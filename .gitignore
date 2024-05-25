@@ -1,4 +1,7 @@
 .ipynb_checkpoints
+ibug/face_alignment/
+ibug/face_detection/
+tmp/
 .vscode
 .idea
 *.pyc
