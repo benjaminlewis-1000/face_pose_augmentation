@@ -1,5 +1,6 @@
 import os
 import cv2
+import time
 import pickle
 import numpy as np
 from scipy.io import loadmat
@@ -7,7 +8,7 @@ from scipy.interpolate import interp1d
 from typing import Optional, Dict, Any, Union, List, Sequence
 from .fpa import __file__ as fpa_init_file
 from .fpa.utils import precompute_conn_point, model_completion_bfm
-from .fpa import generate_profile_faces
+from .fpa import generate_profile_faces, apply_poses
 
 
 __all__ = ['FacePoseAugmentor']
@@ -85,9 +86,20 @@ class FacePoseAugmentor(object):
         if delta_poses.size > 0:
             if delta_poses.ndim > 1:
                 results = []
-                for idx, (corr_map, lms) in enumerate(zip(*generate_profile_faces(
-                        delta_poses, tddfa_result, image, self.fpa_models, True,
-                        landmarks=(landmarks + 1 if landmarks is not None else None)))):
+                gp = time.time()
+                profile_state = generate_profile_faces(delta_poses,
+                        tddfa_result, image, self.fpa_models, True,
+                        landmarks=(landmarks + 1 if landmarks is not None else None))
+                with open("ps.pkl", 'wb') as ph:
+                    pickle.dump(profile_state, ph)
+                print("Profiles", time.time() - gp)
+                gp = time.time()
+                # print(profile_state)
+                profile_faces = apply_poses(delta_poses, self.fpa_models, profile_state, return_corres_map = True, )
+                print(delta_poses)
+                print("Apply poses", time.time() - gp)
+
+                for idx, (corr_map, lms) in enumerate(zip(*profile_faces)):
                     result = dict()
                     result['correspondence_map'] = corr_map
                     lms = np.ascontiguousarray(lms.transpose((0, 2, 1)))

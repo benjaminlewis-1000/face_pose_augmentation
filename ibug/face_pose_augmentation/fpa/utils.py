@@ -1,8 +1,10 @@
 import math
+import time
 import numpy as np
 from scipy.spatial import Delaunay
 from collections import defaultdict
 from typing import Dict, Tuple, Sequence, Optional, Union, List
+from scipy.linalg import lstsq as sp_lstsq
 
 from . import pyFaceFrontalization as pyFF
 from . import pyMM3D as pyMM
@@ -11,7 +13,7 @@ from . import pyMM3D as pyMM
 __all__ = ['precompute_conn_point', 'make_rotation_matrix', 'align_points', 'fit_3d_shape', 'get_euler_angles',
            'fit_model_with_valid_points', 'model_completion_bfm', 'project_shape', 'parse_pose_parameters',
            'z_buffer', 'z_buffer_tri', 'refine_contour_points', 'image_bbox_to_contour',
-           'get_valid_internal_triangles', 'adjust_anchors_z', 'adjust_rotated_anchors', 'back_project_shape',
+           'get_valid_internal_triangles', 'adjust_anchors_z', 'adjust_rotated_anchors_vectorized', 'back_project_shape',
            'image_meshing', 'image_rotation', 'create_correspondence_map', 'remap_image',
            'calc_barycentric_coordinates']
 
@@ -359,7 +361,183 @@ def adjust_anchors_z(contour_all: np.ndarray, contour_all_ref: np.ndarray,
     return contour_all_z
 
 
-def adjust_rotated_anchors(all_vertex_src: np.ndarray, all_vertex_ref: np.ndarray, all_vertex_adjust: np.ndarray,
+
+def adjust_rotated_anchors_vectorized(all_vertex_src: np.ndarray, all_vertex_ref: np.ndarray, all_vertex_adjust: np.ndarray,
+                           bg_tri: np.ndarray, anchor_flags: np.ndarray) -> np.ndarray:
+    # Solve the equation Y = AX for x and y coordinates
+
+    adjust_ind = np.where(np.any([anchor_flags == 2, anchor_flags == 3], axis=0))[0]
+    bg_tri_exp = np.expand_dims(bg_tri, axis=0)
+    bg_tri_exp = np.repeat(bg_tri_exp, len(adjust_ind), axis=0)
+    adj = np.expand_dims(adjust_ind, axis=1)
+    adj = np.expand_dims(adj, axis=2)
+    adj = np.repeat(adj, bg_tri.shape[0], axis=1)
+    adj = np.repeat(adj, bg_tri.shape[1], axis=2)
+
+    comp = bg_tri_exp == adj
+
+    tmp_bin = np.any(comp,axis = 1)
+    # find connecting point
+    bg_shuffle = np.moveaxis(bg_tri_exp, 1, 0)
+
+    temp = bg_shuffle[:, tmp_bin]
+    # Used to separate back out. 
+    per_line_counts = np.count_nonzero(tmp_bin, axis=1)
+    max_dim = np.max(per_line_counts)
+    num_pts = len(per_line_counts)
+
+    connect = np.ones((num_pts, max_dim * 3)) * -1
+    st = 0
+    lp = time.time()
+    for idx, val in enumerate(per_line_counts):
+        aa = np.unique(temp[:, st:st + val])
+        st = st + val
+        connect[idx, :len(aa)] = aa
+
+    adj_cmp = np.expand_dims(adjust_ind, axis=1)
+    adj_cmp = np.repeat(adj_cmp, max_dim * 3, axis=1)
+    connect[connect == adj_cmp] = -1
+
+    def gc():
+        for idx in range(connect.shape[0]):
+            pt_orig = adjust_ind[idx]
+            tmp_bin_orig = np.any(bg_tri == pt_orig, axis=0)
+            # find connecting point
+            temp_orig = bg_tri[:, tmp_bin_orig]
+            connect_orig = np.unique(temp_orig)
+            connect_orig = connect_orig[connect_orig != pt_orig]
+            cc = connect[idx]
+            cc = cc[cc != -1]
+            assert set(cc) == set(connect_orig)
+    # gc()
+
+    # Get a count of non-negative elements in each row
+    elements_per_row_connect = np.count_nonzero(connect != -1, axis=1)
+    connect_trunc = connect[connect != -1]
+    assert len(connect_trunc) == np.sum(elements_per_row_connect)
+
+    repeats_list = list(zip(elements_per_row_connect, adjust_ind))
+    adj_ind_flat = np.hstack([a * [b] for a, b in repeats_list])
+
+    assert(len(adj_ind_flat) == len(connect_trunc))
+
+    pt = adj_ind_flat.astype(np.int64)
+    pt_con = connect_trunc.astype(np.int64)
+
+    c1 = np.where(np.logical_and( (anchor_flags[pt] == 2), (anchor_flags[pt_con] == 1)))[0]
+    c2 = np.where(np.logical_and( (anchor_flags[pt] == 2), (anchor_flags[pt_con] != 1)))[0]
+    c3 = np.where(np.logical_and( (anchor_flags[pt] != 2), (anchor_flags[pt_con] == 1)))[0]
+    c4 = np.where(np.logical_and( (anchor_flags[pt] != 2), (anchor_flags[pt_con] != 1)))[0]
+
+    # assert set(c1) & set(c2) == set()
+    # assert set(c1) & set(c3) == set()
+    # assert set(c1) & set(c4) == set()
+    # assert set(c2) & set(c3) == set()
+    # assert set(c2) & set(c4) == set()
+    # assert set(c3) & set(c4) == set()
+
+    y_equ = np.zeros((2, len(pt)))
+
+    # C1
+
+    x_new = all_vertex_src[0, pt[c1]] - all_vertex_src[0, pt_con[c1]] + all_vertex_adjust[0, pt_con[c1]]
+    y_new = all_vertex_src[1, pt[c1]] - all_vertex_src[1, pt_con[c1]] + all_vertex_adjust[1, pt_con[c1]]
+
+    mapping = dict(zip(adjust_ind, np.arange(len(adjust_ind))))
+    pt1 = np.array([mapping[z] for z in pt[c1]])
+    # pt1 = np.where(adjust_ind == pt)[0]
+
+    a_equ = np.zeros(shape=(2, len(pt), 2 * len(adjust_ind)))
+    a_equ_flat = a_equ.reshape(-1)
+
+    a1 = np.array(list(zip([0]*len(c1), c1, 2 * pt1)))
+    a2 = np.array(list(zip([1]*len(c1), c1, 2 * pt1 + 1)))
+    a1_idcs = np.ravel_multi_index(a1.T, a_equ.shape, order='F') 
+    a2_idcs = np.ravel_multi_index(a2.T, a_equ.shape, order='F') 
+    a_equ_flat[a1_idcs] = 1
+    a_equ_flat[a2_idcs] = 1
+
+    y_equ[:, c1] = [x_new, y_new]
+
+    # C2
+    # src-src and src-ref relationships: based on src relationship
+    x_offset = all_vertex_src[0, pt[c2]] - all_vertex_src[0, pt_con[c2]]
+    y_offset = all_vertex_src[1, pt[c2]] - all_vertex_src[1, pt_con[c2]]
+
+    pt1 = np.array([mapping[z] for z in pt[c2]])
+    pt_con1 = np.array([mapping[z] for z in pt_con[c2]])
+
+    # +1
+    a1 = np.array(list(zip([0]*len(c2), c2, 2 * pt1)))
+    a2 = np.array(list(zip([1]*len(c2), c2, 2 * pt1 + 1)))
+    # -1 
+    a3 = np.array(list(zip([0]*len(c2), c2, 2 * pt_con1)))
+    a4 = np.array(list(zip([1]*len(c2), c2, 2 * pt_con1 + 1)))
+    a1_idcs = np.ravel_multi_index(a1.T, a_equ.shape, order='F') 
+    a2_idcs = np.ravel_multi_index(a2.T, a_equ.shape, order='F') 
+    a3_idcs = np.ravel_multi_index(a3.T, a_equ.shape, order='F') 
+    a4_idcs = np.ravel_multi_index(a4.T, a_equ.shape, order='F') 
+    a_equ_flat[a1_idcs] = 1
+    a_equ_flat[a2_idcs] = 1
+    a_equ_flat[a3_idcs] = -1
+    a_equ_flat[a4_idcs] = -1
+
+    y_equ[:, c2] = [x_offset, y_offset]
+
+
+    # C3
+    x_new = all_vertex_ref[0, pt[c3]] - all_vertex_ref[0, pt_con[c3]] + all_vertex_adjust[0, pt_con[c3]]
+    y_new = all_vertex_ref[1, pt[c3]] - all_vertex_ref[1, pt_con[c3]] + all_vertex_adjust[1, pt_con[c3]]
+
+    pt1 = np.array([mapping[z] for z in pt[c3]])
+
+
+    a1 = np.array(list(zip([0]*len(c3), c3, 2 * pt1)))
+    a2 = np.array(list(zip([1]*len(c3), c3, 2 * pt1 + 1)))
+    a1_idcs = np.ravel_multi_index(a1.T, a_equ.shape, order='F') 
+    a2_idcs = np.ravel_multi_index(a2.T, a_equ.shape, order='F') 
+    a_equ_flat[a1_idcs] = 1
+    a_equ_flat[a2_idcs] = 1
+
+    y_equ[:, c3] = [x_new, y_new]
+
+    # C4 
+    # ref-ref relationships: based on ref relationship
+    x_offset = all_vertex_ref[0, pt[c4]] - all_vertex_ref[0, pt_con[c4]]
+    y_offset = all_vertex_ref[1, pt[c4]] - all_vertex_ref[1, pt_con[c4]]
+
+    pt1 = np.array([mapping[z] for z in pt[c4]])
+    pt_con1 = np.array([mapping[z] for z in pt_con[c4]])
+
+    # +1
+    a1 = np.array(list(zip([0]*len(c2), c2, 2 * pt1)))
+    a2 = np.array(list(zip([1]*len(c2), c2, 2 * pt1 + 1)))
+    # -1 
+    a3 = np.array(list(zip([0]*len(c2), c2, 2 * pt_con1)))
+    a4 = np.array(list(zip([1]*len(c2), c2, 2 * pt_con1 + 1)))
+    a1_idcs = np.ravel_multi_index(a1.T, a_equ.shape, order='F') 
+    a2_idcs = np.ravel_multi_index(a2.T, a_equ.shape, order='F') 
+    a3_idcs = np.ravel_multi_index(a3.T, a_equ.shape, order='F') 
+    a4_idcs = np.ravel_multi_index(a4.T, a_equ.shape, order='F') 
+    a_equ_flat[a1_idcs] = 1
+    a_equ_flat[a2_idcs] = 1
+    a_equ_flat[a3_idcs] = -1
+    a_equ_flat[a4_idcs] = -1
+
+    y_equ[:, c4] = [x_offset, y_offset]
+
+    a_equ = np.reshape(a_equ_flat, a_equ.shape, order='F')
+    lstsq_a = np.reshape(a_equ, (np.prod(a_equ.shape[:2]), -1), order='F')
+    lstsq_b = np.reshape(y_equ, -1, order='F')
+
+    x_equ = np.linalg.solve(lstsq_a.T.dot(lstsq_a), lstsq_a.T.dot(lstsq_b))
+    all_vertex_adjust[:2, adjust_ind] = x_equ.reshape((2, -1), order='F')
+    all_vertex_adjust[2, adjust_ind] = all_vertex_ref[2, adjust_ind]
+
+    return all_vertex_adjust
+
+
+def adjust_rotated_anchors_orig(all_vertex_src: np.ndarray, all_vertex_ref: np.ndarray, all_vertex_adjust: np.ndarray,
                            bg_tri: np.ndarray, anchor_flags: np.ndarray) -> np.ndarray:
     # Solve the equation Y = AX for x and y coordinates
     y_equ = []
@@ -367,6 +545,20 @@ def adjust_rotated_anchors(all_vertex_src: np.ndarray, all_vertex_ref: np.ndarra
 
     # for each outpoint
     adjust_ind = np.where(np.any([anchor_flags == 2, anchor_flags == 3], axis=0))[0]
+    st_loop = time.time()
+
+    data = {"all_vertex_src": all_vertex_src,
+        "all_vertex_ref": all_vertex_ref,
+        "all_vertex_adjust": all_vertex_adjust,
+        "bg_tri": bg_tri,
+        "anchor_flags": anchor_flags}
+
+    import pickle
+    with open('inputs.pkl', 'wb') as fh:
+        pickle.dump(data, fh)
+
+
+    
     for pt in adjust_ind:
         # find the corresponding tri
         tmp_bin = np.any(bg_tri == pt, axis=0)
@@ -434,7 +626,17 @@ def adjust_rotated_anchors(all_vertex_src: np.ndarray, all_vertex_ref: np.ndarra
                     y_equ.extend([x_offset, y_offset])
 
     # get the new position
-    x_equ = np.linalg.lstsq(np.vstack(a_equ), np.array(y_equ), rcond=None)[0]
+    st_lin = time.time()
+    lstsq_a = np.vstack(a_equ)
+    lstsq_b = np.array(y_equ)
+    x3 = np.linalg.solve(lstsq_a.T.dot(lstsq_a), lstsq_a.T.dot(lstsq_b))
+    x_equ = x3
+#    print("x3", x3)
+#    print("allclose", np.allclose(x_equ, x3))
+#     print(x_equ)
+#     print(x2[0])
+#     diff = x_equ - x2[0]
+#     print(np.max(diff), "Diff", diff)
     all_vertex_adjust[:2, adjust_ind] = x_equ.reshape((2, -1), order='F')
     all_vertex_adjust[2, adjust_ind] = all_vertex_ref[2, adjust_ind]
 
@@ -652,8 +854,12 @@ def image_rotation(contlist_src: Sequence[np.ndarray], bg_tri: np.ndarray, verte
         flags[face_contour_modify] = 2
         flags[face_contour_modify_ref] = 3
     anchor_flags = np.hstack(anchor_flags)
-    all_vertex_adjust = adjust_rotated_anchors(
+    all_vertex_adjust = adjust_rotated_anchors_vectorized(
         all_bg_vertex_src, all_bg_vertex_ref, all_vertex_adjust, bg_tri, anchor_flags)
+
+    # cmpr = adjust_rotated_anchors_orig(
+    #     all_bg_vertex_src, all_bg_vertex_ref, all_vertex_adjust, bg_tri, anchor_flags)
+    # assert np.allclose(all_vertex_adjust, cmpr)
 
     counter = 0
     contlist_ref = []

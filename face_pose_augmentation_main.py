@@ -47,7 +47,9 @@ def augment_face_pose(
     delta_pose = delta_pose / 180.0 * np.pi
 
     # Pose augmentation
+    s = time.time()
     augmentation_results = augmentor(image, tddfa_result, delta_pose, landmarks)
+    print("Aug", time.time() - s)
 
     return augmentation_results[0]
 
@@ -136,7 +138,9 @@ def main() -> None:
             continue
 
         # augment the face image
+        s = time.time()
         result = augment_face_pose(tddfa, augmentor, image, landmarks, delta_pose)
+        print(time.time() - s)
 
         # We will not save the correspondence_map in this script
         if "correspondence_map" in result:

@@ -3,6 +3,8 @@ ibug/face_alignment/
 ibug/face_detection/
 tmp/
 .vscode
+*.pkl
+output/
 .idea
 *.pyc
 build

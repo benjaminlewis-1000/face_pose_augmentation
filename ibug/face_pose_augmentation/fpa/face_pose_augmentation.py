@@ -1,4 +1,5 @@
 import cv2
+import time
 import igraph
 import itertools
 import numpy as np
@@ -20,6 +21,8 @@ def generate_profile_faces(delta_poses: np.ndarray, fit_result: Dict, image: np.
     if delta_poses.size == 0:
         return np.array([]), np.array([])
 
+
+    st_1 = time.time() 
     # 1. Get fitting result from 3DDFA (vertex is without affine transform and image space transform)
     roi_box = fit_result['roi_box']
     vertex = fit_result['vertex']
@@ -119,8 +122,72 @@ def generate_profile_faces(delta_poses: np.ndarray, fit_result: Dict, image: np.
                                                pt_barycentric[potential_matches[match]])
         all_tri[:, :bg_tri_alt.shape[1]] = bg_tri
 
+
+    generated_profile_state = {
+        'pitch': pitch,
+        'roll': roll,
+        'yaw': yaw,
+        'vertex_full': vertex_full,
+        'contlist_src': contlist_src, 
+        'bg_tri': bg_tri, 
+        'face_contour_ind': face_contour_ind, 
+        'wp_num': wp_num, 
+        'hp_num': hp_num, 
+        'inner_bg_tri_ind': inner_bg_tri_ind,
+        'f': f,
+        'roi_box': roi_box, 
+        'vertex': vertex, 
+        'f_rot': f_rot, 
+        'tr': tr, 
+        'vertex_full': vertex_full, 
+        't3d': t3d, 
+        'tri_full': tri_full, 
+        'im_height': im_height, 
+        'im_width': im_width, 
+        'projected_vertexm_src': projected_vertexm_src, 
+        'all_tri': all_tri,
+        'bg_tri_alt': bg_tri_alt,
+        'all_vertex_src': all_vertex_src,
+    }
+
+    return generated_profile_state
+
+def apply_poses(delta_poses: np.ndarray, face_models: Dict, profile_state: dict,
+    return_corres_map: bool = False,
+    further_adjust_z: bool = False, landmarks: Optional[np.ndarray] = None,
+                           mouth_point_indices: Sequence[int] = range(48, 68)):
+
+
     maps_or_images = []
     warped_landmarks = []
+    
+    t_poses = time.time()
+
+    pitch = profile_state['pitch']
+    roll = profile_state['roll']
+    yaw = profile_state['yaw']
+    vertex_full = profile_state['vertex_full']
+    contlist_src = profile_state['contlist_src']
+    bg_tri = profile_state['bg_tri']
+    face_contour_ind = profile_state['face_contour_ind']
+    wp_num = profile_state['wp_num']
+    hp_num = profile_state['hp_num']
+    inner_bg_tri_ind = profile_state['inner_bg_tri_ind']
+    roi_box = profile_state['roi_box']
+    vertex = profile_state['vertex']
+    f_rot = profile_state['f_rot']
+    tr = profile_state['tr']
+    vertex_full = profile_state['vertex_full']
+    tri_full = profile_state['tri_full']
+    im_height = profile_state['im_height']
+    im_width = profile_state['im_width']
+    f = profile_state['f']
+    t3d = profile_state['t3d']
+    projected_vertexm_src = profile_state['projected_vertexm_src']
+    all_tri = profile_state['all_tri']
+    bg_tri_alt = profile_state['bg_tri_alt']
+    all_vertex_src = profile_state['all_vertex_src']
+
     for pitch_delta, yaw_delta, roll_delta in delta_poses:
         # 3. Rotating and Anchor Adjustment
         pitch_ref = pitch + pitch_delta
@@ -251,6 +318,7 @@ def generate_profile_faces(delta_poses: np.ndarray, fit_result: Dict, image: np.
         else:
             warped_landmarks.append(np.stack([landmarks_3d, landmarks_2d]))
 
+    print("Applying poses: ", time.time() - t_poses)
     return np.stack(maps_or_images), np.stack(warped_landmarks)
 
 
