@@ -20,9 +20,10 @@ pip install -e .
 cd ../.. # Back to root
 mv tmp/face_detection/ibug/face_detection ibug/face_detection
 mv tmp/face_alignment/ibug/face_alignment ibug/face_alignment
+
 rm -rf tmp
 
-#cp rewritten_code/face_pose_augmentation_main.py .
-#cp rewritten_code/test_accel.py .
-#cp rewritten_code/fpa/* ibug/face_pose_augmentation/fpa
-#cp rewritten_code/face_pose_augmentor.py ibug/face_pose_augmentation
+cp rewritten_code/face_pose_augmentation_main.py .
+cp rewritten_code/test_accel.py .
+cp rewritten_code/fpa/* ibug/face_pose_augmentation/fpa
+cp rewritten_code/face_pose_augmentor.py ibug/face_pose_augmentation
